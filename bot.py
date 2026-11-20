@@ -183,13 +183,23 @@ class Bot:
         parts = text.split()
         cmd = parts[0].split("@")[0].lower()
         args = parts[1:]
-        if cmd in ("/start", "/help"):
-            self.tg.send(chat_id, HELP_TEXT)
-        elif cmd == "/quote":
-            self.cmd_quote(chat_id, args)
-        elif cmd == "/check":
-            self.cmd_check(chat_id, args)
-        # unknown commands are ignored quietly (busy groups)
+        # Safety net: a command must never fail silently. The command
+        # handlers already translate StoaError into a reply; anything
+        # else that escapes gets a generic one here.
+        try:
+            if cmd in ("/start", "/help"):
+                self.tg.send(chat_id, HELP_TEXT)
+            elif cmd == "/quote":
+                self.cmd_quote(chat_id, args)
+            elif cmd == "/check":
+                self.cmd_check(chat_id, args)
+            # unknown commands are ignored quietly (busy groups)
+        except Exception:
+            log.exception("handler failed for %s", cmd)
+            try:
+                self.tg.send(chat_id, "Something glitched on my side — try again in a moment.")
+            except Exception:
+                pass
 
     def run(self) -> None:
         # Startup must survive a network blip too: retry getMe/setMyCommands
