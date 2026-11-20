@@ -1,0 +1,16 @@
+[Unit]
+Description=Stoa Telegram quote/check bot (Robinhood Chain)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/workspace/stoa-bot
+EnvironmentFile=%h/workspace/stoa-bot/.env
+ExecStart=/usr/bin/python3 %h/workspace/stoa-bot/bot.py
+Restart=on-failure
+RestartSec=10
+# The bot token lives only in the EnvironmentFile (mode 0600).
+
+[Install]
+WantedBy=default.target
