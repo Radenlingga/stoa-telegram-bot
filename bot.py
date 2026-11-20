@@ -75,7 +75,20 @@ class Telegram:
             payload["reply_markup"] = {
                 "inline_keyboard": [[{"text": label, "url": url}]]
             }
-        self.call("sendMessage", payload, timeout=30)
+        # Retry transient send failures (network blips, Telegram 5xx/429)
+        # a few times with short backoff instead of dropping the reply —
+        # or worse, taking the whole bot down with it.
+        delay = 1
+        for attempt in range(3):
+            try:
+                self.call("sendMessage", payload, timeout=30)
+                return
+            except Exception as e:
+                if attempt == 2:
+                    raise
+                log.warning("sendMessage failed (%s) — retrying in %ss", e, delay)
+                time.sleep(delay)
+                delay *= 2
 
 
 class Bot:
@@ -179,19 +192,31 @@ class Bot:
         # unknown commands are ignored quietly (busy groups)
 
     def run(self) -> None:
-        me = self.tg.call("getMe")
+        # Startup must survive a network blip too: retry getMe/setMyCommands
+        # with growing backoff (3s -> 30s max) instead of exiting before the
+        # bot ever starts polling.
+        backoff = 3
+        while True:
+            try:
+                me = self.tg.call("getMe")
+                self.tg.call(
+                    "setMyCommands",
+                    {"commands": [
+                        {"command": "quote", "description": "Quote a Robinhood Chain token (buy with ETH, or TOKEN TOKEN amount)"},
+                        {"command": "check", "description": "Safety-check a Robinhood Chain token"},
+                        {"command": "start", "description": "Start / how to use this bot"},
+                        {"command": "help", "description": "How to use this bot"},
+                    ]},
+                )
+                break
+            except Exception as e:
+                log.warning("startup failed (%s) — retrying in %ss", e, backoff)
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 30)
         self.username = me.get("username")
         log.info("Bot @%s running (long polling)", self.username)
-        self.tg.call(
-            "setMyCommands",
-            {"commands": [
-                {"command": "quote", "description": "Quote a Robinhood Chain token (buy with ETH, or TOKEN TOKEN amount)"},
-                {"command": "check", "description": "Safety-check a Robinhood Chain token"},
-                {"command": "start", "description": "Start / how to use this bot"},
-                {"command": "help", "description": "How to use this bot"},
-            ]},
-        )
         offset = 0
+        backoff = 3
         while True:
             try:
                 updates = self.tg.call(
@@ -199,19 +224,28 @@ class Bot:
                     {"offset": offset, "timeout": 50, "allowed_updates": ["message"]},
                     timeout=70,
                 )
-            except Exception as e:  # network hiccup — back off and keep polling
-                log.warning("getUpdates failed: %s", e)
-                time.sleep(5)
+            except Exception as e:  # network/Telegram hiccup — back off, poll forever
+                log.warning("getUpdates failed: %s — retrying in %ss", e, backoff)
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 30)
                 continue
-            for upd in updates:
-                offset = max(offset, upd["update_id"] + 1)
-                msg = upd.get("message") or upd.get("edited_message")
-                if not msg:
-                    continue
-                try:
-                    self.handle(msg)
-                except Exception:
-                    log.exception("handler failed")
+            backoff = 3
+            # Guard the whole batch: a malformed update or any unexpected
+            # error while processing must be logged, never fatal.
+            try:
+                for upd in updates:
+                    uid = upd.get("update_id")
+                    if uid is not None:
+                        offset = max(offset, uid + 1)
+                    msg = upd.get("message") or upd.get("edited_message")
+                    if not msg:
+                        continue
+                    try:
+                        self.handle(msg)
+                    except Exception:
+                        log.exception("handler failed")
+            except Exception:
+                log.exception("update processing failed — continuing")
 
 
 def main() -> int:
